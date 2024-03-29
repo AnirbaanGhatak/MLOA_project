@@ -56,12 +56,6 @@ class ProDriver(RookieDriver):
         self.num_future_steps = None
 
     def choose_tyres(self, track_info: TrackInfo) -> TyreChoice:
-        # This method is called at the start of the race and whenever the driver chooses to make a pitstop. It needs to
-        # return a TyreChoice enum
-
-        # TODO: make an informed choice here!
-        # self.current_tyre_choice = ...
-
         self.track_info = track_info
         self.fit_base_tyre_model()
         return self.current_tyre_choice
@@ -72,7 +66,7 @@ class ProDriver(RookieDriver):
         self.completed_straights = []
         self.weather_data.append([])
         self.track_grips.append([])
-        self.track_grip_model_y = None  # will need to refit these as won't have historic data for this race
+        self.track_grip_model_y = None  
         self.track_grip_model_x = None
 
         if self.grip_fig is not None:
@@ -90,8 +84,7 @@ class ProDriver(RookieDriver):
         if 1 == self.move_number:
             self.update_target_speeds(grips_up_straight=np.tile(car_state.tyre_grip, track_state.distance_ahead))
 
-        # Store the tyre data
-        if 0 == car_state.tyre_age:         # new tyre, add a column of nans ready for data
+        if 0 == car_state.tyre_age:        
             n = self.tyre_data[car_state.tyre_choice].shape[0]
             self.tyre_data[car_state.tyre_choice] = np.hstack([self.tyre_data[car_state.tyre_choice],
                                                                np.full((n, 1), np.nan)])
@@ -120,20 +113,16 @@ class ProDriver(RookieDriver):
             self.at_turn = True
             return self._choose_turn_direction(track_state)
 
-        # Update the target speeds at the start of a straight, to take tyre degradation into account. We could do this
-        # every move but limit it to avoid slowing code down too much
         elif track_state.distance_ahead > 0 and self.at_turn:
-            if weather_state.rain_intensity == 0:           # we will already have updated them otherwise
+            if weather_state.rain_intensity == 0:          
                 t0 = time_fn()
                 self.update_target_speeds(track_state.distance_ahead, car_state, weather_state)
-                # print(f'\tUpdating target speeds took {time_fn() - t0: .2f} seconds')
             t0 = time_fn()
             self.box_box_box = self.should_we_change_tyres()
-            # print(f'\tTesting pit stop {time_fn() - t0: .2f} seconds')
             if self.box_box_box and self.print_info:
                 print('Box! Box! Box!')
 
-            self.drs_was_active = False         # start of new straight, reset log
+            self.drs_was_active = False        
 
         self.at_turn = False
 
@@ -252,17 +241,13 @@ class ProDriver(RookieDriver):
             # Refit tyre model now we have more data
             t0 = time_fn()
             self.fit_tyre_model()
-            # print(f'\tFitting tyre model took {time_fn() - t0: .2f} seconds')
             t0 = time_fn()
             self.fit_track_grip()
-            # print(f'\tFitting track grip model took {time_fn() - t0: .2f} seconds')
 
         # record the change in speed resulting from the action we took
         elif action in self.sl_data and self.move_number > self.last_raining_move + 30:
             # Remove the grip effect from the delta to get the true dynamics
             if Action.HeavyBrake == action and 0 == new_car_state.speed:
-                # Heavy braking delta can take the car "below" zero, which is then capped at 0. When this happens we
-                # don't see the effect of the grip multiplier so we don't want to normalise the delta
                 normalised_delta = (new_car_state.speed - previous_car_state.speed)
             else:
                 normalised_delta = (new_car_state.speed - previous_car_state.speed) / self.get_grip(previous_car_state, exclude_track=True)
@@ -744,16 +729,6 @@ class ProDriver(RookieDriver):
     @staticmethod
     def autoregressive_forecast(model_y, model_x, historic_x, historic_y, current_x, num_forecast_steps, bound_y=True,
                                 bound_x=True):
-        # Predict the y at the current time point and then for num_forecast_steps into the future by alternating y and
-        # x predictions:
-        #       predict y_t given x_t and {y_t-i, x_t-i} i = 1:num_previous_steps
-        #       predict x_t+1 given [y_t, x_t] and {y_t-i, x_t-i} i = 1:num_previous_steps
-        #
-        # If bound_y is True then bounds y to be within (0, 1). If bound_x is True then bounds x to be within (0, 100)
-
-        # Figure out the number of previous steps
-        #   > number of model features = D*(num_previous_steps + 1) + num_previous_steps
-        #   > num_previous_steps = (number of model features - D) / (D + 1)
         N, D = historic_x.shape
         num_previous_steps = int((model_y.n_features_in_ - D) / (D + 1))
         if historic_x.shape[0] < num_previous_steps:
@@ -767,8 +742,7 @@ class ProDriver(RookieDriver):
             if historic_x.shape[0] < num_previous_steps:
                 raise ValueError("'Refitting track grip model hasn't fixed it, something has gone wrong...")
             else:
-                print('Refitting track grip model has fixed it but you should probably work out where the missed train '
-                      'should be called')
+                print('Refitting track grip model')
 
         if current_x.ndim == 1:
             current_x = current_x[None, :]
@@ -804,27 +778,6 @@ class ProDriver(RookieDriver):
 
     @staticmethod
     def format_ar_arrays_for_y(X, y, num_previous_steps=0):
-        # Format two arrays used to predict the current value of y given the current value of x and num_previous_steps
-        # of x and y.
-        # y_inputs will include x at the current time step, x at the num_previous_steps time points and y at the
-        # num_previous_steps time points. Hence number of cols = D*(num_previous_steps + 1) + num_previous_steps
-        #
-        #   num_previous_steps = 2
-        #       X = [ x_00, x_01, x_02 ]          y = [ y_0 ]
-        #           [ x_10, x_11, x_12 ]              [ y_1 ]
-        #           [ x_20, x_21, x_22 ]              [ y_2 ]
-        #           [ x_30, x_31, x_32 ]              [ y_3 ]
-        #           [ x_40, x_41, x_42 ]              [ y_4 ]
-        #
-        #                     |- current_x -|   |-------   previous_y, previous_x   -------|
-        #       y_inputs =  [ x_20, x_21, x_22, y_1, x_10, x_11, x_12, y_0, x_00, x_01, x_02 ]
-        #                   [ x_30, x_31, x_32, y_2, x_20, x_21, x_22, y_1, x_10, x_11, x_12 ]
-        #                   [ x_40, x_41, x_42, y_3, x_30, x_31, x_32, y_2, x_20, x_21, x_22 ]
-        #
-        #       y_targets = [ y_2 ]
-        #                   [ y_3 ]
-        #                   [ y_4 ]
-
         N, D = X.shape
         y = y.ravel()
         y_inputs = np.zeros((N - num_previous_steps, D + (D + 1) * num_previous_steps))
@@ -840,26 +793,6 @@ class ProDriver(RookieDriver):
 
     @staticmethod
     def format_ar_arrays_for_x(X, y, num_previous_steps=0):
-        # Format two arrays used to predict the next value of x given the current value of x and y and
-        # num_previous_steps of x and y. Hence number of cols = D*(num_previous_steps + 1) + num_previous_steps
-        #
-        #   num_previous_steps = 2
-        #       X = [ x_00, x_01, x_02 ]          y = [ y_0 ]
-        #           [ x_10, x_11, x_12 ]              [ y_1 ]
-        #           [ x_20, x_21, x_22 ]              [ y_2 ]
-        #           [ x_30, x_31, x_32 ]              [ y_3 ]
-        #           [ x_40, x_41, x_42 ]              [ y_4 ]
-        #
-        #                     |-- cur_y, cur_x --|   |-------   previous_y, previous_x   -------|
-        #       x_inputs =  [ y_2, x_20, x_21, x_22, y_1, x_10, x_11, x_12, y_0, x_00, x_01, x_02 ]
-        #                   [ y_3, x_30, x_31, x_32, y_2, x_20, x_21, x_22, y_1, x_10, x_11, x_12 ]
-        #
-        #       x_targets = [x_30, x_31, x_32]
-        #                   [x_40, x_41, x_42]
-        #
-        # Note, x_inputs has one more dimension and one fewer data point than y_inputs
-
-
         N, D = X.shape
         if y.ndim == 1:
             y = y[:, None]
